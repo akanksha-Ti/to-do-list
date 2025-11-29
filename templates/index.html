@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Modern To-Do • My Tasks</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <!-- Inter + Material Icons -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2L2 7l10 5 10-5-10-5zm0 13l-10-5v8l10 5 10-5v-8l-10 5z"/></svg>
+        <div>
+          <div class="title">My To-Do</div>
+          <div class="subtitle">Small wins — big progress</div>
+        </div>
+      </div>
+
+      <div class="toolbar">
+        <input id="search" class="search" type="search" placeholder="Search tasks..." aria-label="Search tasks">
+
+        <div class="filters">
+          <button data-filter="all" class="filter-btn active">All</button>
+          <button data-filter="pending" class="filter-btn">Pending</button>
+          <button data-filter="completed" class="filter-btn">Completed</button>
+        </div>
+
+        <button id="themeToggle" class="icon-btn" title="Toggle theme" aria-label="Toggle theme">
+          <!-- simple sun/moon icon toggle handled in CSS/JS -->
+          <svg class="ic" viewBox="0 0 24 24"><path fill="currentColor" d="M6.76 4.84l-1.8-1.79L3.17 4.85l1.79 1.79 1.8-1.8zm10.48 14.32l1.8 1.79 1.79-1.79-1.79-1.79-1.8 1.79zM1 13h3v-2H1v2zm19 0h3v-2h-3v2zM12 6a6 6 0 100 12 6 6 0 000-12z"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="left">
+        <div class="card abstract">
+          <!-- decorative abstract blob -->
+          <svg class="blob" viewBox="0 0 600 600" preserveAspectRatio="none" aria-hidden="true">
+            <defs><linearGradient id="gA" x1="0" x2="1"><stop offset="0" stop-color="#7c5cff"/><stop offset="1" stop-color="#00d1c1"/></linearGradient></defs>
+            <path fill="url(#gA)" d="M421.6,333.2Q394,416.4,327.1,438.9Q260.2,461.4,183.9,430.2Q107.7,399,72.3,327.6Q36.9,256.2,74.1,183Q111.3,109.8,183.1,84.6Q255,59.4,318.7,89.4Q382.4,119.4,422,182.1Q461.6,244.8,421.6,333.2Z"></path>
+          </svg>
+
+          <div class="quote">
+            <div class="qtitle">Daily Inspiration</div>
+            <p>“{{ quote }}”</p>
+            <div class="qmeta">— Your To-Do App</div>
+          </div>
+        </div>
+
+        <div class="card clockcard">
+          <div class="date">{{ server_date }}</div>
+          <div id="clock" class="clockjs">--:--:--</div>
+          <div class="muted">Server baseline: {{ server_time }}</div>
+        </div>
+
+        <div class="card tip">
+          <div class="muted">Tip</div>
+          <div>Use reminders for important deadlines. Notifications fire while this page is open.</div>
+        </div>
+      </aside>
+
+      <section class="right">
+        <!-- Add task inline form (keeps backend fields) -->
+        <form class="card addcard" action="{{ url_for('add_task') }}" method="POST" autocomplete="off">
+          <div class="add-left">
+            <input name="task" class="input maininput" type="text" placeholder="What needs to be done?" required>
+            <div class="small-row">
+              <input name="due_date" class="input small" type="date" title="Due date">
+              <input name="due_time" class="input small" type="time" title="Due time">
+              <input name="reminder_dt" class="input small" type="datetime-local" title="Reminder">
+            </div>
+          </div>
+          <div class="add-right">
+            <button class="btn primary" type="submit">Add</button>
+          </div>
+        </form>
+
+        <!-- tasks list -->
+        <div id="tasks" class="tasklist">
+          {% if tasks %}
+            {% for task in tasks %}
+              <article class="taskcard {{ 'completed' if task['status']=='Completed' else '' }}"
+                       data-id="{{ task['id'] }}"
+                       data-status="{{ task['status'] }}"
+                       data-reminder="{{ task['reminder_dt'] if task['reminder_dt'] else '' }}">
+                <div class="leftcol">
+                  <div class="title-row">
+                    <div class="task-title">{{ task['description'] }}</div>
+                    {% if task['reminder_dt'] %}
+                      <span class="pill reminder">🔔</span>
+                    {% endif %}
+                    {% if task['due_date'] or task['due_time'] %}
+                      <span class="pill due">🗓
+                        <span class="duetext">
+                          {% if task['due_date'] %}{{ task['due_date'] }}{% endif %}
+                          {% if task['due_time'] %} {{ task['due_time'] }}{% endif %}
+                        </span>
+                      </span>
+                    {% endif %}
+                  </div>
+
+                  <div class="meta-row">
+                    <div class="small muted">Added: {{ task['created_at'] }}</div>
+                    <div class="small countdown" aria-hidden="true"></div>
+                  </div>
+
+                  <!-- inline reminder edit (posts to existing set_reminder route) -->
+                  <form action="{{ url_for('set_reminder', task_id=task['id']) }}" method="POST" class="reminder-form">
+                    <input type="datetime-local" name="reminder_dt"
+                           value="{{ task['reminder_dt'] if task['reminder_dt'] else '' }}" class="input tiny">
+                    <button class="btn secondary tiny" type="submit">Save</button>
+                    <button class="btn danger tiny" type="submit" name="reminder_dt" value="">Remove</button>
+                  </form>
+                </div>
+
+                <div class="rightcol">
+                  {% if task['status']=='Pending' %}
+                    <form action="{{ url_for('complete_task', task_id=task['id']) }}" method="POST" class="action-form">
+                      <button class="icon-btn circle done" type="submit" title="Mark complete">✔</button>
+                    </form>
+                  {% else %}
+                    <div class="status-badge">Completed</div>
+                  {% endif %}
+
+                  <form action="{{ url_for('delete_task', task_id=task['id']) }}" method="POST" class="action-form">
+                    <button class="icon-btn circle del" type="submit" title="Delete">🗑</button>
+                  </form>
+                </div>
+              </article>
+            {% endfor %}
+          {% else %}
+            <div class="card empty">No tasks yet — add your first task above ✨</div>
+          {% endif %}
+        </div>
+
+        <!-- FAB for small screens -->
+        <button id="fabAdd" class="fab" title="Add task">＋</button>
+      </section>
+    </main>
+  </div>
+
+  <!-- JS: theme toggle, search/filter, live clock, reminders countdown & notifications -->
+  <script>
+    // theme toggle
+    const themeToggle = document.getElementById('themeToggle');
+    const root = document.documentElement;
+    const stored = localStorage.getItem('theme');
+    if (stored === 'light') root.classList.add('light');
+    themeToggle && themeToggle.addEventListener('click', () => {
+      root.classList.toggle('light');
+      localStorage.setItem('theme', root.classList.contains('light') ? 'light' : 'dark');
+    });
+
+    // search & filter
+    const searchEl = document.getElementById('search');
+    const filterBtns = document.querySelectorAll('.filter-btn');
+    const tasksContainer = document.getElementById('tasks');
+
+    function applyFilter() {
+      const q = searchEl.value.toLowerCase().trim();
+      const active = document.querySelector('.filter-btn.active').dataset.filter;
+      document.querySelectorAll('.taskcard').forEach(card => {
+        const title = card.querySelector('.task-title').innerText.toLowerCase();
+        const status = card.dataset.status.toLowerCase();
+        const matchSearch = !q || title.includes(q);
+        const matchFilter = active === 'all' || (active === 'pending' && status === 'pending') || (active === 'completed' && status === 'completed');
+        card.style.display = (matchSearch && matchFilter) ? '' : 'none';
+      });
+    }
+
+    searchEl && searchEl.addEventListener('input', applyFilter);
+    filterBtns.forEach(btn => btn.addEventListener('click', e => {
+      filterBtns.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      applyFilter();
+    }));
+
+    // live clock (server baseline)
+    (function(){
+      const serverTimeStr = "{{ server_time }}".replace(' ', 'T');
+      let baseline = new Date(serverTimeStr);
+      if (isNaN(baseline)) baseline = new Date();
+      const offset = Date.now() - baseline.getTime();
+      const clockEl = document.getElementById('clock');
+      function tick() {
+        const now = new Date(Date.now() - offset);
+        clockEl.textContent = now.toLocaleTimeString();
+      }
+      tick(); setInterval(tick, 1000);
+    })();
+
+    // notifications & countdowns
+    (function(){
+      if ("Notification" in window && Notification.permission === "default") Notification.requestPermission();
+      document.querySelectorAll('.taskcard').forEach(card => {
+        const rem = card.dataset.reminder;
+        const countdownEl = card.querySelector('.countdown');
+        if (!rem) return;
+        const remTime = Date.parse(rem);
+        if (isNaN(remTime)) return;
+
+        function update() {
+          const now = Date.now();
+          const ms = remTime - now;
+          if (ms <= 0) {
+            countdownEl.textContent = 'Now / overdue';
+            card.classList.add('pulse');
+          } else {
+            const days = Math.floor(ms / 86400000);
+            const hours = Math.floor(ms / 3600000) % 24;
+            const mins = Math.floor(ms / 60000) % 60;
+            let txt = '';
+            if (days) txt += days + 'd ';
+            if (hours) txt += hours + 'h ';
+            txt += mins + 'm';
+            countdownEl.textContent = txt + ' left';
+          }
+        }
+
+        update(); setInterval(update, 30*1000);
+
+        const diff = remTime - Date.now();
+        if (diff > 0) {
+          setTimeout(() => {
+            if (Notification.permission === 'granted') {
+              new Notification('Reminder', { body: card.querySelector('.task-title').innerText });
+            } else {
+              // fallback
+              alert('Reminder: ' + card.querySelector('.task-title').innerText);
+            }
+            card.classList.add('pulse');
+          }, diff);
+        } else {
+          // already overdue
+          card.classList.add('pulse');
+        }
+      });
+    })();
+
+    // FAB scroll to add / focus
+    const fab = document.getElementById('fabAdd');
+    if (fab) fab.addEventListener('click', () => {
+      document.querySelector('.maininput').focus();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+
+    // initial apply filter to hide/show cards correctly
+    applyFilter();
+  </script>
+</body>
+</html>

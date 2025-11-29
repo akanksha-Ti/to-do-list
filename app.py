@@ -8,8 +8,8 @@ app = Flask(__name__)
 
 # -------------------------------------------------
 # DATABASE PATH (SQLite everywhere)
-#  - Local: ./tasks_final.db
-#  - Vercel: /tmp/tasks_final.db  (writable)
+#  - Local: ./tasks_clean.db
+#  - Vercel: /tmp/tasks_clean.db  (writable)
 # -------------------------------------------------
 IS_VERCEL = bool(
     os.environ.get("VERCEL")
@@ -18,9 +18,9 @@ IS_VERCEL = bool(
 )
 
 if IS_VERCEL:
-    DB_PATH = "/tmp/tasks_final.db"
+    DB_PATH = "/tmp/tasks_clean.db"
 else:
-    DB_PATH = "tasks_final.db"
+    DB_PATH = "tasks_clean.db"
 
 
 QUOTES = [
@@ -40,13 +40,15 @@ def get_db_connection():
     return conn
 
 
-def ensure_columns(conn):
+def ensure_schema():
     """
-    Ensure tasks table exists and has due_date, due_time, reminder_dt columns.
-    Adds missing columns with ALTER TABLE (no data loss).
+    Ensure tasks table exists and that due_date, due_time, reminder_dt columns exist.
+    Uses ALTER TABLE to add missing columns without dropping data.
     """
+    conn = get_db_connection()
     cur = conn.cursor()
-    # Create table if it doesn't exist at all
+
+    # 1) Make sure table exists
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS tasks (
@@ -59,11 +61,11 @@ def ensure_columns(conn):
     )
     conn.commit()
 
-    # Check existing columns
+    # 2) Check current columns
     cur.execute("PRAGMA table_info(tasks);")
     cols = [row[1] for row in cur.fetchall()]
 
-    # Add missing columns safely
+    # 3) Add missing columns with ALTER TABLE
     if "due_date" not in cols:
         cur.execute("ALTER TABLE tasks ADD COLUMN due_date TEXT;")
     if "due_time" not in cols:
@@ -73,16 +75,11 @@ def ensure_columns(conn):
 
     conn.commit()
     cur.close()
-
-
-def init_db():
-    conn = get_db_connection()
-    ensure_columns(conn)
     conn.close()
 
 
-# Run once at import to fix schema
-init_db()
+# run once at startup
+ensure_schema()
 
 
 @app.route("/")
@@ -117,7 +114,6 @@ def add_task():
 
     conn = get_db_connection()
     try:
-        # Try normal insert
         conn.execute(
             """
             INSERT INTO tasks (description, due_date, due_time, reminder_dt)
@@ -127,9 +123,14 @@ def add_task():
         )
         conn.commit()
     except sqlite3.OperationalError as e:
-        # If schema is old (no reminder_dt), fix and retry once
-        if "no column named reminder_dt" in str(e) or "no column named due_time" in str(e) or "no column named due_date" in str(e):
-            ensure_columns(conn)
+        # If some column is missing (old schema), fix schema and retry ONCE
+        if (
+            "no column named due_date" in str(e)
+            or "no column named due_time" in str(e)
+            or "no column named reminder_dt" in str(e)
+        ):
+            ensure_schema()
+            conn = get_db_connection()
             conn.execute(
                 """
                 INSERT INTO tasks (description, due_date, due_time, reminder_dt)
@@ -178,9 +179,9 @@ def set_reminder(task_id):
         )
         conn.commit()
     except sqlite3.OperationalError as e:
-        # If reminder_dt was missing for some reason, fix schema and retry once
         if "no column named reminder_dt" in str(e):
-            ensure_columns(conn)
+            ensure_schema()
+            conn = get_db_connection()
             conn.execute(
                 "UPDATE tasks SET reminder_dt = ? WHERE id = ?;",
                 (reminder_dt, task_id),

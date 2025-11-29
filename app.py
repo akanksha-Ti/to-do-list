@@ -7,16 +7,20 @@ import random
 app = Flask(__name__)
 
 # -------------------------------------------------
-# DATABASE: use SQLite everywhere
-#  - Local: ./tasks_v2.db
-#  - Vercel: /tmp/tasks_v2.db  (always writable)
+# DATABASE PATH (SQLite only)
+#  - Local: ./tasks_v3.db
+#  - Vercel: /tmp/tasks_v3.db (writable)
 # -------------------------------------------------
-IS_VERCEL = bool(os.environ.get("VERCEL") or os.environ.get("VERCEL_URL") or os.environ.get("VERCEL_ENV"))
+IS_VERCEL = bool(
+    os.environ.get("VERCEL")
+    or os.environ.get("VERCEL_URL")
+    or os.environ.get("VERCEL_ENV")
+)
 
 if IS_VERCEL:
-    DB_PATH = "/tmp/tasks_v2.db"   # NEW FILE NAME on Vercel
+    DB_PATH = "/tmp/tasks_v3.db"   # NEW NAME so old DB is ignored
 else:
-    DB_PATH = "tasks_v2.db"        # NEW FILE NAME locally
+    DB_PATH = "tasks_v3.db"
 
 
 QUOTES = [
@@ -36,17 +40,12 @@ def get_db_connection():
     return conn
 
 
-def init_db():
-    """
-    Force-create the tasks table with the RIGHT columns in the NEW DB file.
-    This ignores any old 'database.db' or 'tasks.db' files.
-    """
+def recreate_tasks_table():
+    """Drop and recreate tasks table with the correct schema."""
     conn = get_db_connection()
     cur = conn.cursor()
 
-    # Make absolutely sure schema is fresh
     cur.execute("DROP TABLE IF EXISTS tasks;")
-
     cur.execute(
         """
         CREATE TABLE tasks (
@@ -66,7 +65,31 @@ def init_db():
     conn.close()
 
 
-# Run ONCE at import time to ensure correct schema
+def init_db():
+    """Ensure DB file exists and tasks table has correct columns."""
+    # If DB file doesn't exist, just recreate everything.
+    if not os.path.exists(DB_PATH):
+        recreate_tasks_table()
+        return
+
+    # If it exists, try to select reminder_dt.
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("PRAGMA table_info(tasks);")
+        cols = [row[1] for row in cur.fetchall()]
+        if "reminder_dt" not in cols or "due_time" not in cols or "due_date" not in cols:
+            # Wrong schema -> recreate
+            recreate_tasks_table()
+    except sqlite3.OperationalError:
+        # Table doesn't exist or broken -> recreate
+        recreate_tasks_table()
+    finally:
+        cur.close()
+        conn.close()
+
+
+# Run once at import
 init_db()
 
 
@@ -97,8 +120,12 @@ def add_task():
     due_time = request.form.get("due_time") or None
     reminder_dt = request.form.get("reminder_dt") or None  # "YYYY-MM-DDTHH:MM"
 
-    if desc:
-        conn = get_db_connection()
+    if not desc:
+        return redirect(url_for("index"))
+
+    # Try insert. If schema is wrong (no reminder_dt), fix & retry once.
+    conn = get_db_connection()
+    try:
         conn.execute(
             """
             INSERT INTO tasks (description, due_date, due_time, reminder_dt)
@@ -107,6 +134,24 @@ def add_task():
             (desc, due_date, due_time, reminder_dt),
         )
         conn.commit()
+    except sqlite3.OperationalError as e:
+        # If this is the classic error, fix schema and retry once.
+        if "no column named reminder_dt" in str(e):
+            conn.close()
+            recreate_tasks_table()
+            conn = get_db_connection()
+            conn.execute(
+                """
+                INSERT INTO tasks (description, due_date, due_time, reminder_dt)
+                VALUES (?, ?, ?, ?);
+                """,
+                (desc, due_date, due_time, reminder_dt),
+            )
+            conn.commit()
+        else:
+            conn.close()
+            raise
+    finally:
         conn.close()
 
     return redirect(url_for("index"))

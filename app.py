@@ -1,21 +1,34 @@
 from flask import Flask, render_template, request, redirect, url_for
-import sqlite3
-import os
 from datetime import datetime
+import os
 import random
+
+from dotenv import load_dotenv
+
+# Load .env for local dev (harmless on Vercel)
+load_dotenv()
 
 app = Flask(__name__)
 
 # -----------------------------
-# Database path: local vs Vercel
+# Environment / DB mode
 # -----------------------------
-# On Vercel, the normal filesystem is read-only.
-# Only /tmp is writable, so we store the SQLite DB there.
-if os.environ.get("VERCEL") or os.environ.get("VERCEL_ENV"):
-    # Running on Vercel
-    DB_PATH = "/tmp/database.db"
+IS_VERCEL = bool(os.environ.get("VERCEL_URL") or os.environ.get("VERCEL"))
+USE_POSTGRES = IS_VERCEL  # Vercel -> Postgres (Supabase), Local -> SQLite
+
+if USE_POSTGRES:
+    # Postgres / Supabase
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+
+    DATABASE_URL = os.environ.get("DATABASE_URL")
+    if not DATABASE_URL:
+        raise RuntimeError(
+            "DATABASE_URL is not set. For Vercel, add it in Project Settings -> Environment Variables."
+        )
 else:
-    # Local development
+    # Local SQLite
+    import sqlite3
     DB_PATH = "database.db"
 
 QUOTES = [
@@ -28,33 +41,62 @@ QUOTES = [
     "One thing at a time — make it count."
 ]
 
+# -----------------------------
+# DB helpers
+# -----------------------------
 def get_db_connection():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    if USE_POSTGRES:
+        conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+        return conn
+    else:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        return conn
 
 def init_db():
-    # For local: only create if file not exists.
-    # For Vercel: /tmp is empty on each cold start, so we always ensure table exists.
     conn = get_db_connection()
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS tasks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            description TEXT NOT NULL,
-            status TEXT DEFAULT 'Pending',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            due_date TEXT,
-            due_time TEXT,
-            reminder_dt TEXT
+    cur = conn.cursor()
+
+    if USE_POSTGRES:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tasks (
+                id          SERIAL PRIMARY KEY,
+                description TEXT NOT NULL,
+                status      TEXT DEFAULT 'Pending',
+                created_at  TIMESTAMPTZ DEFAULT NOW(),
+                due_date    TEXT,
+                due_time    TEXT,
+                reminder_dt TEXT
+            );
+            """
         )
-    ''')
+    else:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                description TEXT NOT NULL,
+                status TEXT DEFAULT 'Pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                due_date TEXT,
+                due_time TEXT,
+                reminder_dt TEXT
+            );
+            """
+        )
+
     conn.commit()
+    cur.close()
     conn.close()
 
-# Ensure DB + table exist
+# create table on startup
 init_db()
 
-@app.route('/')
+# -----------------------------
+# Routes
+# -----------------------------
+@app.route("/")
 def index():
     now = datetime.now()
     server_time = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -62,57 +104,113 @@ def index():
     quote = random.choice(QUOTES)
 
     conn = get_db_connection()
-    tasks = conn.execute('SELECT * FROM tasks ORDER BY id').fetchall()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM tasks ORDER BY id;")
+    tasks = cur.fetchall()
+    cur.close()
     conn.close()
-    return render_template('index.html',
-                           tasks=tasks,
-                           server_time=server_time,
-                           server_date=server_date,
-                           quote=quote)
 
-@app.route('/add', methods=['POST'])
+    return render_template(
+        "index.html",
+        tasks=tasks,
+        server_time=server_time,
+        server_date=server_date,
+        quote=quote,
+    )
+
+@app.route("/add", methods=["POST"])
 def add_task():
-    desc = request.form.get('task', '').strip()
-    due_date = request.form.get('due_date') or None
-    due_time = request.form.get('due_time') or None
-    reminder_dt = request.form.get('reminder_dt') or None  # "YYYY-MM-DDTHH:MM"
+    desc = request.form.get("task", "").strip()
+    due_date = request.form.get("due_date") or None
+    due_time = request.form.get("due_time") or None
+    reminder_dt = request.form.get("reminder_dt") or None  # "YYYY-MM-DDTHH:MM"
 
     if desc:
         conn = get_db_connection()
-        conn.execute(
-            'INSERT INTO tasks (description, due_date, due_time, reminder_dt) VALUES (?, ?, ?, ?)',
-            (desc, due_date, due_time, reminder_dt)
-        )
+        cur = conn.cursor()
+
+        if USE_POSTGRES:
+            cur.execute(
+                """
+                INSERT INTO tasks (description, due_date, due_time, reminder_dt)
+                VALUES (%s, %s, %s, %s);
+                """,
+                (desc, due_date, due_time, reminder_dt),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO tasks (description, due_date, due_time, reminder_dt)
+                VALUES (?, ?, ?, ?);
+                """,
+                (desc, due_date, due_time, reminder_dt),
+            )
+
         conn.commit()
+        cur.close()
         conn.close()
 
-    return redirect(url_for('index'))
+    return redirect(url_for("index"))
 
-@app.route('/complete/<int:task_id>', methods=['POST'])
+@app.route("/complete/<int:task_id>", methods=["POST"])
 def complete_task(task_id):
     conn = get_db_connection()
-    conn.execute("UPDATE tasks SET status='Completed' WHERE id=?", (task_id,))
-    conn.commit()
-    conn.close()
-    return redirect(url_for('index'))
+    cur = conn.cursor()
 
-@app.route('/delete/<int:task_id>', methods=['POST'])
+    if USE_POSTGRES:
+        cur.execute(
+            "UPDATE tasks SET status = 'Completed' WHERE id = %s;",
+            (task_id,),
+        )
+    else:
+        cur.execute(
+            "UPDATE tasks SET status = 'Completed' WHERE id = ?;",
+            (task_id,),
+        )
+
+    conn.commit()
+    cur.close()
+    conn.close()
+    return redirect(url_for("index"))
+
+@app.route("/delete/<int:task_id>", methods=["POST"])
 def delete_task(task_id):
     conn = get_db_connection()
-    conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
-    conn.commit()
-    conn.close()
-    return redirect(url_for('index'))
+    cur = conn.cursor()
 
-@app.route('/set_reminder/<int:task_id>', methods=['POST'])
+    if USE_POSTGRES:
+        cur.execute("DELETE FROM tasks WHERE id = %s;", (task_id,))
+    else:
+        cur.execute("DELETE FROM tasks WHERE id = ?;", (task_id,))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+    return redirect(url_for("index"))
+
+@app.route("/set_reminder/<int:task_id>", methods=["POST"])
 def set_reminder(task_id):
-    val = request.form.get('reminder_dt')
+    val = request.form.get("reminder_dt")
     reminder_dt = val if val else None
-    conn = get_db_connection()
-    conn.execute('UPDATE tasks SET reminder_dt = ? WHERE id = ?', (reminder_dt, task_id))
-    conn.commit()
-    conn.close()
-    return redirect(url_for('index'))
 
-if __name__ == '__main__':
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    if USE_POSTGRES:
+        cur.execute(
+            "UPDATE tasks SET reminder_dt = %s WHERE id = %s;",
+            (reminder_dt, task_id),
+        )
+    else:
+        cur.execute(
+            "UPDATE tasks SET reminder_dt = ? WHERE id = ?;",
+            (reminder_dt, task_id),
+        )
+
+    conn.commit()
+    cur.close()
+    conn.close()
+    return redirect(url_for("index"))
+
+if __name__ == "__main__":
     app.run(debug=True)
